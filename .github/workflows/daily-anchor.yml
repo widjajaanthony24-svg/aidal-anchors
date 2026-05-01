@@ -1,0 +1,64 @@
+name: AIDAL Daily Anchor
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  anchor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          gpg --list-secret-keys
+
+      - name: Configure git
+        run: |
+          git config user.name "AIDAL Audit System"
+          git config user.email "try.aidal@gmail.com"
+          git config user.signingkey ${{ secrets.GPG_KEY_ID }}
+          git config commit.gpgsign false
+          git config tag.gpgsign true
+
+      - name: Fetch today's hashes from AIDAL API
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          echo "DATE=$TODAY" >> $GITHUB_ENV
+          curl -s "https://aidal-production.up.railway.app/anchor/daily-hashes" \
+            -H "X-Admin-Secret: ${{ secrets.AIDAL_ADMIN_SECRET }}" \
+            -o daily_hashes.json
+          cat daily_hashes.json
+
+      - name: Build anchor file and sign tag
+        run: |
+          TODAY=${{ env.DATE }}
+          COUNT=$(cat daily_hashes.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('count', 0))")
+          MASTER=$(cat daily_hashes.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('master_hash', 'no_decisions'))")
+
+          mkdir -p anchors
+          cat > anchors/$TODAY.json << EOF
+          {
+            "date": "$TODAY",
+            "master_hash": "$MASTER",
+            "record_count": $COUNT,
+            "anchored_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "signed_by": "AIDAL Audit System <try.aidal@gmail.com>",
+            "verify_url": "https://aidal-production.up.railway.app/verify/public/{audit_id}",
+            "public_key": "https://github.com/widjajaanthony24-svg/aidal-anchors/blob/main/PUBLIC_KEY.asc",
+            "note": "This anchor is GPG-signed. Verify with: git tag -v $TODAY"
+          }
+          EOF
+
+          git add anchors/$TODAY.json
+          git commit -m "AIDAL anchor $TODAY — $COUNT decisions — ${MASTER:0:16}"
+          git tag -s "$TODAY" -m "AIDAL anchor $TODAY | master_hash: $MASTER | decisions: $COUNT"
+          git push origin main
+          git push origin "$TODAY"
