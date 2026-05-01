@@ -5,6 +5,9 @@ on:
     - cron: '0 0 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   anchor:
     runs-on: ubuntu-latest
@@ -18,15 +21,20 @@ jobs:
       - name: Import GPG key
         run: |
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
-          gpg --list-secret-keys
+          gpg --list-secret-keys --keyid-format LONG
+          KEY_FP=$(gpg --list-secret-keys --keyid-format LONG --with-colons | grep '^fpr' | head -1 | cut -d: -f10)
+          echo "KEY_FP=$KEY_FP" >> $GITHUB_ENV
+          echo "Using fingerprint: $KEY_FP"
+          echo "$KEY_FP:6:" | gpg --import-ownertrust
 
       - name: Configure git
         run: |
           git config user.name "AIDAL Audit System"
           git config user.email "try.aidal@gmail.com"
-          git config user.signingkey ${{ secrets.GPG_KEY_ID }}
+          git config user.signingkey ${{ env.KEY_FP }}
           git config commit.gpgsign false
           git config tag.gpgsign true
+          git config --global gpg.program gpg
 
       - name: Fetch today's hashes from AIDAL API
         run: |
@@ -35,13 +43,16 @@ jobs:
           curl -s "https://aidal-production.up.railway.app/anchor/daily-hashes" \
             -H "X-Admin-Secret: ${{ secrets.AIDAL_ADMIN_SECRET }}" \
             -o daily_hashes.json
+          echo "API response:"
           cat daily_hashes.json
 
       - name: Build anchor file and sign tag
+        env:
+          GNUPGHOME: /root/.gnupg
         run: |
           TODAY=${{ env.DATE }}
-          COUNT=$(cat daily_hashes.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('count', 0))")
-          MASTER=$(cat daily_hashes.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('master_hash', 'no_decisions'))")
+          COUNT=$(python3 -c "import json; d=json.load(open('daily_hashes.json')); print(d.get('count', 0))")
+          MASTER=$(python3 -c "import json; d=json.load(open('daily_hashes.json')); print(d.get('master_hash', 'no_decisions'))")
 
           mkdir -p anchors
           cat > anchors/$TODAY.json << EOF
@@ -51,14 +62,28 @@ jobs:
             "record_count": $COUNT,
             "anchored_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "signed_by": "AIDAL Audit System <try.aidal@gmail.com>",
+            "key_fingerprint": "${{ env.KEY_FP }}",
             "verify_url": "https://aidal-production.up.railway.app/verify/public/{audit_id}",
             "public_key": "https://github.com/widjajaanthony24-svg/aidal-anchors/blob/main/PUBLIC_KEY.asc",
-            "note": "This anchor is GPG-signed. Verify with: git tag -v $TODAY"
+            "note": "GPG-signed anchor. Verify with: git tag -v $TODAY"
           }
           EOF
 
+          echo "Anchor file contents:"
+          cat anchors/$TODAY.json
+
           git add anchors/$TODAY.json
           git commit -m "AIDAL anchor $TODAY — $COUNT decisions — ${MASTER:0:16}"
-          git tag -s "$TODAY" -m "AIDAL anchor $TODAY | master_hash: $MASTER | decisions: $COUNT"
+
+          gpg --batch --yes --pinentry-mode loopback \
+            -u "${{ env.KEY_FP }}" \
+            --sign --armor \
+            anchors/$TODAY.json > anchors/$TODAY.json.sig
+
+          git add anchors/$TODAY.json.sig
+          git commit -m "GPG signature for $TODAY anchor"
+
+          git tag -a "$TODAY" -m "AIDAL anchor $TODAY | master_hash: $MASTER | decisions: $COUNT"
+
           git push origin main
           git push origin "$TODAY"
