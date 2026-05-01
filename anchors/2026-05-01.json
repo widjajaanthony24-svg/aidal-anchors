@@ -2,7 +2,7 @@
   "date": "2026-05-01",
   "master_hash": "857355abb06a78835b5a36ed5ce4f7b037576ce3fe309fa9a68026ce97fb70a9",
   "record_count": 25,
-  "anchored_at": "2026-05-01T13:14:47.145339+00:00",
+  "anchored_at": "2026-05-01T13:20:00.486113+00:00",
   "verify_url": "https://aidal-production.up.railway.app/verify/public/{audit_id}",
   "note": "This master hash represents all AIDAL decisions logged on this date. Anyone can independently verify any individual decision at the verify_url above.",
   "how_to_verify": "Take any audit_id from this date, call GET /verify/public/{audit_id} on the AIDAL API, and confirm the hash is authentic."
