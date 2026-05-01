@@ -11,6 +11,8 @@ permissions:
 jobs:
   anchor:
     runs-on: ubuntu-latest
+    env:
+      GNUPGHOME: /tmp/gnupg
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -20,6 +22,8 @@ jobs:
 
       - name: Import GPG key
         run: |
+          mkdir -p /tmp/gnupg
+          chmod 700 /tmp/gnupg
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
           gpg --list-secret-keys --keyid-format LONG
           KEY_FP=$(gpg --list-secret-keys --keyid-format LONG --with-colons | grep '^fpr' | head -1 | cut -d: -f10)
@@ -34,7 +38,6 @@ jobs:
           git config user.signingkey ${{ env.KEY_FP }}
           git config commit.gpgsign false
           git config tag.gpgsign true
-          git config --global gpg.program gpg
 
       - name: Fetch today's hashes from AIDAL API
         run: |
@@ -47,8 +50,6 @@ jobs:
           cat daily_hashes.json
 
       - name: Build anchor file and sign tag
-        env:
-          GNUPGHOME: /root/.gnupg
         run: |
           TODAY=${{ env.DATE }}
           COUNT=$(python3 -c "import json; d=json.load(open('daily_hashes.json')); print(d.get('count', 0))")
@@ -72,18 +73,13 @@ jobs:
           echo "Anchor file contents:"
           cat anchors/$TODAY.json
 
-          git add anchors/$TODAY.json
-          git commit -m "AIDAL anchor $TODAY — $COUNT decisions — ${MASTER:0:16}"
-
           gpg --batch --yes --pinentry-mode loopback \
             -u "${{ env.KEY_FP }}" \
-            --sign --armor \
-            anchors/$TODAY.json > anchors/$TODAY.json.sig
+            --detach-sign --armor \
+            anchors/$TODAY.json
 
-          git add anchors/$TODAY.json.sig
-          git commit -m "GPG signature for $TODAY anchor"
-
+          git add anchors/$TODAY.json anchors/$TODAY.json.asc
+          git commit -m "AIDAL anchor $TODAY — $COUNT decisions — ${MASTER:0:16}"
           git tag -a "$TODAY" -m "AIDAL anchor $TODAY | master_hash: $MASTER | decisions: $COUNT"
-
           git push origin main
           git push origin "$TODAY"
