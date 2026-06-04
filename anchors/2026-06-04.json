@@ -1,0 +1,11 @@
+{
+  "date": "2026-06-04",
+  "master_hash": "230bc355f9459cdef99454f2750a3ed5f85452ef16dfb2bb8fba370f0709ad19",
+  "record_count": 11,
+  "anchored_at": "2026-06-04T04:42:03Z",
+  "signed_by": "AIDAL Audit System <try.aidal@gmail.com>",
+  "key_fingerprint": "DCFE20CF49E8C86E93FA36AF6777991B9FF72DD2",
+  "verify_url": "https://aidal-production.up.railway.app/verify/public/{audit_id}",
+  "public_key": "https://github.com/widjajaanthony24-svg/aidal-anchors/blob/main/PUBLIC_KEY.asc",
+  "note": "GPG-signed anchor. Verify with: git tag -v 2026-06-04"
+}
