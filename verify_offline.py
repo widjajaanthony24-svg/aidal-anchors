@@ -51,10 +51,13 @@ import shutil
 # every record will appear tampered even when nothing was touched. If
 # AIDAL ever adds a new post-hash field to decision records, this list
 # and the server's _NON_HASHED_FIELDS constant both need updating together.
-NON_HASHED_FIELDS = ("_hash", "explanation", "compliance", "explanation_source")
+#
+# hash_version is one of these fields, not a hash input — see compute_hash_v1
+# below for why that split matters.
+NON_HASHED_FIELDS = ("_hash", "explanation", "compliance", "explanation_source", "hash_version")
 
 
-def compute_hash(data: dict, prev_hash):
+def compute_hash_v1(data: dict, prev_hash):
     """
     Mirrors AIDAL's production compute_hash() exactly:
 
@@ -66,9 +69,39 @@ def compute_hash(data: dict, prev_hash):
     this serialization (e.g. by adding explicit separators) without also
     changing it on the server — the two must stay byte-for-byte identical,
     or this verifier will report false tampering on untouched records.
+
+    This has been the ONLY hashing method AIDAL has ever used (confirmed
+    against full git history — no drift, ever). It's named _v1 and dispatched
+    through HASH_METHODS below purely so that IF a genuine v2 method is ever
+    needed, old records (which have no hash_version field at all) and new
+    ones (tagged hash_version="v1" or later "v2") can both still be verified
+    correctly in the same run, instead of forcing a choice between "support
+    old records" and "fix the serialization."
     """
     payload = json.dumps(data, sort_keys=True, default=str) + (prev_hash or "GENESIS")
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+# Records logged before this field existed have no "hash_version" key at all
+# (json.load gives None for a missing key via .get()) — they used, and always
+# used, the v1 method. Add "v2": compute_hash_v2 here the day a real second
+# method exists; until then this dict has exactly one real entry plus the
+# None-means-v1 backward-compatibility alias.
+HASH_METHODS = {
+    None: compute_hash_v1,
+    "v1": compute_hash_v1,
+}
+
+
+def compute_hash(data: dict, prev_hash, hash_version=None):
+    method = HASH_METHODS.get(hash_version)
+    if method is None:
+        raise ValueError(
+            f"Unknown hash_version {hash_version!r} — this verifier doesn't know how "
+            "to check this record. You likely need a newer version of verify_offline.py; "
+            "check aidal-anchors for an update."
+        )
+    return method(data, prev_hash)
 
 
 def verify_chain(decisions: list):
@@ -85,11 +118,16 @@ def verify_chain(decisions: list):
             return False, f"TAMPERED AT RECORD #{i} (audit_id={audit_id}): no stored hash found on this record."
 
         verify_data = {k: v for k, v in d.items() if k not in NON_HASHED_FIELDS}
-        computed = compute_hash(verify_data, prev_hash)
+        hash_version = d.get("hash_version")  # None on records logged before this field existed
+        try:
+            computed = compute_hash(verify_data, prev_hash, hash_version)
+        except ValueError as e:
+            return False, f"CANNOT VERIFY RECORD #{i} (audit_id={audit_id}): {e}"
         if computed != stored_hash:
             return False, (
                 f"TAMPERED AT RECORD #{i} (audit_id={audit_id}): "
                 f"stored hash does not match the recomputed hash.\n"
+                f"  hash_version: {hash_version!r}\n"
                 f"  stored:    {stored_hash}\n"
                 f"  recomputed:{computed}"
             )
