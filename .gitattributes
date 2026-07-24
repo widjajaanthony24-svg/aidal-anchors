@@ -1,0 +1,9 @@
+# These files are cryptographically signed byte-for-byte. Git's autocrlf
+# on Windows silently converts LF to CRLF on checkout, which makes locally
+# checked-out copies fail GPG verification even though the published files
+# are untouched — a false alarm this repo's history has already hit once
+# by accident. Force LF, unconditionally, for anything signature-relevant.
+anchors/*.json text eol=lf
+anchors/*.json.asc text eol=lf
+PUBLIC_KEY.asc text eol=lf
+archive/*.asc text eol=lf

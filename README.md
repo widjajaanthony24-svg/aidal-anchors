@@ -35,6 +35,16 @@ This confirms the anchor file is genuinely signed by AIDAL and unaltered since p
 
 If you check `2026-05-01.json`, `2026-05-02.json`, or `2026-05-03.json` against their `.asc` files, GPG will report a bad signature. This was caught during testing (not by an external report) — those 3 early files' signatures don't match their currently-published content. Every anchor from `2026-05-04` onward verifies correctly (73 of 77 total files as of this writing). `2026-04-30`, the very first anchor, predates signing being implemented at all and has no `.asc`.
 
+## Key rotation — 2026-07-24
+
+The original signing key (fingerprint `DCFE 20CF 49E8 C86E 93FA 36AF 6777 991B 9FF7 2DD2`) was only ever stored as a GitHub Actions secret, with no backup kept outside it. GitHub Actions secrets are write-only by design — once that was the only copy, it was unrecoverable. A new key was generated and this time backed up in two independent locations outside CI.
+
+- **Anchors dated 2026-07-24 and earlier** verify against the old key, archived at [`archive/PUBLIC_KEY_2026-05-01_to_2026-07-24.asc`](archive/PUBLIC_KEY_2026-05-01_to_2026-07-24.asc). Re-verified directly against the raw published bytes as part of this rotation — every anchor from `2026-05-04` through `2026-07-24` still checks out clean.
+- **Anchors from 2026-07-25 onward** verify against the current [`PUBLIC_KEY.asc`](PUBLIC_KEY.asc), fingerprint `2539 1C5B 3FE0 1549 00D4 9E1C 7CDD EE24 91E0 1485`.
+- This does not change or re-sign anything published before the rotation — old anchors keep their original signatures and their original (now archived) key.
+
+If you're verifying an anchor and get a bad-signature result, check the date against the cutover above before assuming something's wrong — and if you're on Windows, make sure git isn't rewriting these files to CRLF on checkout (`git config core.autocrlf false` in this repo; `.gitattributes` now forces this, but a clone from before this fix may need `git add --renormalize .`).
+
 ## License
 
 MIT — see `LICENSE`.
