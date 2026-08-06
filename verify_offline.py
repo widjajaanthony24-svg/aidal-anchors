@@ -17,6 +17,11 @@ USAGE
     # Optionally also check the day's public GPG-signed anchor:
     python3 verify_offline.py export.json --anchor anchor_2026-07-15.txt --pubkey PUBLIC_KEY.asc
 
+    # For a decision logged with client-side hashing (a "digest" field, no
+    # input_features/output stored on AIDAL's side — see CANONICAL_FORMAT.md):
+    # confirm YOUR OWN retained raw data matches the digest AIDAL sealed.
+    python3 verify_offline.py export.json --audit-id aud_xxx --raw-decision my_raw_decision.json
+
 WHAT THIS CHECKS
 ----------------
   1. Recomputes every decision's hash using AIDAL's exact production
@@ -29,12 +34,20 @@ WHAT THIS CHECKS
      across ALL companies' activity, not a per-company breakdown — see
      the verify_anchor() docstring below for exactly what this can and
      can't prove about your own specific records.
+  4. (optional, --audit-id + --raw-decision) For a decision logged via
+     client-side hashing, recomputes the canonical digest from YOUR OWN
+     retained raw data and confirms it matches the "digest" field AIDAL
+     sealed into the chain. AIDAL never had your raw data for this kind of
+     record, so steps 1-2 alone only prove the digest wasn't altered AFTER
+     being sealed — this step is what proves the digest actually
+     corresponds to real decision content, and only you can run it, since
+     only you still have that content.
 
 Steps 1-2 require ONLY the export file and never touch the network. Step 3
 is optional and shells out to your local `gpg` binary rather than
 reimplementing OpenPGP signature verification in Python — a real GPG
 install is far more trustworthy than a hand-rolled crypto implementation
-would be.
+would be. Step 4 requires only the export file and your own retained data.
 
 No dependencies beyond the Python standard library.
 """
@@ -45,6 +58,13 @@ import argparse
 import subprocess
 import shutil
 
+# Windows consoles default to cp1252, which can't print the em-dashes used
+# throughout this script's output — they'd render as "?" or garbled bytes
+# instead of crashing outright, easy to miss. UTF-8 stdout fixes it; no
+# effect on Linux/macOS terminals, which are already UTF-8.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 # These are the exact fields the AIDAL server adds to a decision record
 # AFTER computing its hash (see compute_hash's call site in log_decision,
 # and _NON_HASHED_FIELDS in api.py). They must be excluded here too, or
@@ -52,44 +72,63 @@ import shutil
 # AIDAL ever adds a new post-hash field to decision records, this list
 # and the server's _NON_HASHED_FIELDS constant both need updating together.
 #
-# hash_version is one of these fields, not a hash input — see compute_hash_v1
-# below for why that split matters.
-NON_HASHED_FIELDS = ("_hash", "explanation", "compliance", "explanation_source", "hash_version")
+# hash_version and evidence_schema_version are two of these fields, not
+# hash inputs — see compute_hash_v1 below for why that split matters.
+NON_HASHED_FIELDS = ("_hash", "explanation", "compliance", "explanation_source", "hash_version", "evidence_schema_version")
 
 
 def compute_hash_v1(data: dict, prev_hash):
     """
-    Mirrors AIDAL's production compute_hash() exactly:
+    Mirrors AIDAL's original production compute_hash() (2026 launch through
+    the client-side-hashing rollout on 2026-08-05):
 
         payload = json.dumps(data, sort_keys=True, default=str) + (prev_hash or "GENESIS")
         return hashlib.sha256(payload.encode()).hexdigest()
 
     sort_keys=True is what makes this deterministic regardless of dict
-    ordering after a JSON export/re-parse round trip. Do not "improve"
-    this serialization (e.g. by adding explicit separators) without also
-    changing it on the server — the two must stay byte-for-byte identical,
-    or this verifier will report false tampering on untouched records.
-
-    This has been the ONLY hashing method AIDAL has ever used (confirmed
-    against full git history — no drift, ever). It's named _v1 and dispatched
-    through HASH_METHODS below purely so that IF a genuine v2 method is ever
-    needed, old records (which have no hash_version field at all) and new
-    ones (tagged hash_version="v1" or later "v2") can both still be verified
-    correctly in the same run, instead of forcing a choice between "support
-    old records" and "fix the serialization."
+    ordering after a JSON export/re-parse round trip. Every record logged
+    under hash_version "v1" or absent (records from before the field
+    existed) must keep verifying against exactly this serialization
+    forever — see HASH_METHODS below.
     """
     payload = json.dumps(data, sort_keys=True, default=str) + (prev_hash or "GENESIS")
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-# Records logged before this field existed have no "hash_version" key at all
-# (json.load gives None for a missing key via .get()) — they used, and always
-# used, the v1 method. Add "v2": compute_hash_v2 here the day a real second
-# method exists; until then this dict has exactly one real entry plus the
-# None-means-v1 backward-compatibility alias.
+def compute_hash_v2(data: dict, prev_hash):
+    """
+    Canonical Evidence Format v1 (see CANONICAL_FORMAT.md in aidal-backend)
+    — compact separators, UTF-8 without forced ASCII-escaping, sorted keys.
+    Adopted 2026-08-05 alongside client-side hashing, so a customer's own
+    JSON library in any language reproduces identical bytes to AIDAL's.
+    Records logged from that point on carry hash_version "v2".
+    """
+    payload = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str) + (prev_hash or "GENESIS")
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def canonical_digest(data: dict) -> str:
+    """
+    AIDAL Canonical Evidence Format v1 (see CANONICAL_FORMAT.md) — the same
+    algorithm a client uses to compute a decision's `digest` before sending
+    only that digest to AIDAL. Used by verify_digest() below to recompute a
+    digest from YOUR OWN retained raw decision data and confirm it matches
+    what AIDAL sealed. Deliberately identical to compute_hash_v2's payload
+    serialization (same format, different purpose: this covers only a
+    decision's own content, never company_id/prev_hash/logged_at, which a
+    client doesn't know and shouldn't need to).
+    """
+    payload = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# Records logged before hash_version existed at all have no such key
+# (json.load gives None for a missing key via .get()) — they used, and
+# always used, the v1 method.
 HASH_METHODS = {
     None: compute_hash_v1,
     "v1": compute_hash_v1,
+    "v2": compute_hash_v2,
 }
 
 
@@ -144,6 +183,50 @@ def verify_chain(decisions: list):
         prev_hash = stored_hash
 
     return True, f"VERIFIED — {len(decisions)} records, full chain intact, no tampering detected."
+
+
+def verify_digest(decisions: list, audit_id: str, raw_decision_path: str):
+    """
+    For a decision logged via client-side hashing (a "digest" field on the
+    record, no input_features/output stored on AIDAL's side): recomputes
+    the canonical digest from your own retained raw data and confirms it
+    matches what AIDAL sealed. Returns (ok: bool, message: str).
+
+    raw_decision_path should contain JSON shaped like what canonical_digest()
+    expects — {"input_features": {...}, "output": {...}} — i.e. exactly what
+    your own code hashed locally before sending AIDAL only the digest.
+    """
+    record = next((r for r in decisions if r.get("audit_id") == audit_id), None)
+    if record is None:
+        return False, f"No record with audit_id={audit_id} found in this export."
+
+    d = record.get("decision") or {}
+    stored_digest = d.get("digest")
+    if not stored_digest:
+        return False, (
+            f"Record {audit_id} has no 'digest' field — this record was logged via the "
+            "server-side hashing path (raw input_features/output sent to AIDAL directly), "
+            "not client-side hashing. There's nothing for this check to compare against; "
+            "the chain-hash check above already covers this record."
+        )
+
+    try:
+        with open(raw_decision_path) as f:
+            raw_data = json.load(f)
+    except Exception as e:
+        return False, f"Could not read raw decision data from {raw_decision_path}: {e}"
+
+    recomputed = canonical_digest(raw_data)
+    if recomputed != stored_digest:
+        return False, (
+            f"DIGEST MISMATCH for {audit_id}: your raw data does NOT match what AIDAL sealed.\n"
+            f"  stored digest:     {stored_digest}\n"
+            f"  recomputed digest: {recomputed}\n"
+            "Either the raw data you provided isn't what was actually hashed at the time, or "
+            "your JSON serialization doesn't match CANONICAL_FORMAT.md exactly — check key "
+            "sorting, whitespace, and ASCII-escaping in whatever produced raw_decision_path."
+        )
+    return True, f"DIGEST VERIFIED — {audit_id}: your raw data matches the digest AIDAL sealed."
 
 
 def verify_anchor(anchor_data_path: str, pubkey_path: str) -> str:
@@ -207,6 +290,8 @@ def main():
     parser.add_argument("export_file", help="Path to an aidal_export_*.json file")
     parser.add_argument("--anchor", help="Path to a downloaded anchors/{date}.json file (its .json.asc signature must be alongside it)")
     parser.add_argument("--pubkey", help="Path to PUBLIC_KEY.asc (optional, used with --anchor)")
+    parser.add_argument("--audit-id", help="Check a specific client-side-hashed record's digest (use with --raw-decision)")
+    parser.add_argument("--raw-decision", help="Path to your own retained raw decision data — {\"input_features\":..., \"output\":...} — for the --audit-id digest check")
     args = parser.parse_args()
 
     with open(args.export_file) as f:
@@ -231,7 +316,15 @@ def main():
     elif args.anchor or args.pubkey:
         print("Both --anchor and --pubkey are required to check the daily anchor — skipping that step.")
 
-    sys.exit(0 if (ok and not anchor_failed) else 1)
+    digest_failed = False
+    if args.audit_id and args.raw_decision:
+        digest_ok, digest_message = verify_digest(decisions or [], args.audit_id, args.raw_decision)
+        print(digest_message)
+        digest_failed = not digest_ok
+    elif args.audit_id or args.raw_decision:
+        print("Both --audit-id and --raw-decision are required to check a digest — skipping that step.")
+
+    sys.exit(0 if (ok and not anchor_failed and not digest_failed) else 1)
 
 
 if __name__ == "__main__":
