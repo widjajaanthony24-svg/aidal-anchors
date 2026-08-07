@@ -87,7 +87,9 @@ if hasattr(sys.stdout, "reconfigure"):
 NON_HASHED_FIELDS_BY_SCHEMA = {
     None: ("_hash", "explanation", "compliance", "explanation_source", "hash_version", "evidence_schema_version"),
     "v2": ("_hash", "explanation", "compliance", "explanation_source", "hash_version", "evidence_schema_version"),
-    "v3": ("_hash", "explanation", "explanation_source", "hash_version", "evidence_schema_version"),
+    "v3": ("_hash", "explanation", "explanation_source", "explanation_generated_at",
+           "explanation_regenerated", "explanation_originally_generated_at",
+           "hash_version", "evidence_schema_version"),
 }
 
 
@@ -169,6 +171,7 @@ def verify_chain(decisions: list):
 
     prev_hash = None
     digest_mismatches = []
+    regenerated = []
     for i, record in enumerate(decisions):
         audit_id = record.get("audit_id", "?")
         d = dict(record.get("decision") or {})
@@ -186,6 +189,13 @@ def verify_chain(decisions: list):
         # chain check, because these are two genuinely different findings.
         if d.get("digest_verification") == "MISMATCH":
             digest_mismatches.append(audit_id)
+
+        # An explanation regenerated after sealing is commentary about a past
+        # decision, not evidence of what was said at the time — and it is not
+        # covered by the hash. Surfaced so nobody reads a 2029-generated
+        # explanation as if it had been produced alongside a 2026 decision.
+        if d.get("explanation_regenerated"):
+            regenerated.append((audit_id, d.get("logged_at"), d.get("explanation_generated_at")))
 
         verify_data = {k: v for k, v in d.items() if k not in non_hashed_fields(d.get("evidence_schema_version"))}
         hash_version = d.get("hash_version")  # None on records logged before this field existed
@@ -221,6 +231,13 @@ def verify_chain(decisions: list):
             f"supplied did not match the raw decision data sent with it. The chain is intact (nothing "
             f"was altered after sealing), but these records are internally inconsistent and the "
             f"discrepancy was never resolved:\n  " + "\n  ".join(digest_mismatches)
+        )
+    if regenerated:
+        msg += (
+            f"\n\nNOTE — {len(regenerated)} record(s) carry an explanation that was regenerated AFTER "
+            f"the decision was sealed. Explanations are advisory and not covered by the hash, so this is "
+            f"not tampering — but do not read these as the explanation that existed at decision time:\n  "
+            + "\n  ".join(f"{aid}  sealed {sealed}  explanation generated {gen}" for aid, sealed, gen in regenerated)
         )
     return True, msg
 
