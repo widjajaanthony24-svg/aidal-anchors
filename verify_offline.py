@@ -90,6 +90,12 @@ NON_HASHED_FIELDS_BY_SCHEMA = {
     "v3": ("_hash", "explanation", "explanation_source", "explanation_generated_at",
            "explanation_regenerated", "explanation_originally_generated_at",
            "hash_version", "evidence_schema_version"),
+    # v4 seals submitted_by_credential — same exclusion list as v3, because
+    # the new field is INSIDE the hash. Records are attributable to a
+    # specific, revocable credential from v4 onward.
+    "v4": ("_hash", "explanation", "explanation_source", "explanation_generated_at",
+           "explanation_regenerated", "explanation_originally_generated_at",
+           "hash_version", "evidence_schema_version"),
 }
 
 
