@@ -65,16 +65,35 @@ import shutil
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-# These are the exact fields the AIDAL server adds to a decision record
-# AFTER computing its hash (see compute_hash's call site in log_decision,
-# and _NON_HASHED_FIELDS in api.py). They must be excluded here too, or
-# every record will appear tampered even when nothing was touched. If
-# AIDAL ever adds a new post-hash field to decision records, this list
-# and the server's _NON_HASHED_FIELDS constant both need updating together.
+# Fields AIDAL adds to a decision record AFTER computing its hash. They must
+# be excluded here too, or every record appears tampered when nothing was
+# touched. This is keyed on the record's own evidence_schema_version, because
+# schema v3 moved `compliance` INSIDE the hash — verifying a v2 record with
+# v3's list (or vice versa) reports false tampering.
 #
-# hash_version and evidence_schema_version are two of these fields, not
-# hash inputs — see compute_hash_v1 below for why that split matters.
-NON_HASHED_FIELDS = ("_hash", "explanation", "compliance", "explanation_source", "hash_version", "evidence_schema_version")
+# The v3 split is AIDAL's answer to "which parts of this record are evidence,
+# and which are advisory?":
+#   SEALED   — the decision, its digest, the digest verification result, and
+#              the compliance verdict. Changing any of these breaks the hash.
+#   ADVISORY — explanation + explanation_source only. Regenerable by design
+#              (AIDAL exposes an endpoint to re-run explanation generation),
+#              so they cannot be sealed without making a supported operation
+#              indistinguishable from tampering. Treat them as commentary,
+#              NOT as evidence.
+#
+# MUST be kept in sync with _NON_HASHED_FIELDS_BY_SCHEMA in aidal-backend's
+# api.py. These live in two separate repos with no shared source of truth and
+# have drifted once before — change both in the same commit, always.
+NON_HASHED_FIELDS_BY_SCHEMA = {
+    None: ("_hash", "explanation", "compliance", "explanation_source", "hash_version", "evidence_schema_version"),
+    "v2": ("_hash", "explanation", "compliance", "explanation_source", "hash_version", "evidence_schema_version"),
+    "v3": ("_hash", "explanation", "explanation_source", "hash_version", "evidence_schema_version"),
+}
+
+
+def non_hashed_fields(evidence_schema_version):
+    """Field-exclusion list for a record, keyed on that record's own schema version."""
+    return NON_HASHED_FIELDS_BY_SCHEMA.get(evidence_schema_version, NON_HASHED_FIELDS_BY_SCHEMA[None])
 
 
 def compute_hash_v1(data: dict, prev_hash):
@@ -149,6 +168,7 @@ def verify_chain(decisions: list):
         return False, "No decisions in this export."
 
     prev_hash = None
+    digest_mismatches = []
     for i, record in enumerate(decisions):
         audit_id = record.get("audit_id", "?")
         d = dict(record.get("decision") or {})
@@ -156,7 +176,18 @@ def verify_chain(decisions: list):
         if not stored_hash:
             return False, f"TAMPERED AT RECORD #{i} (audit_id={audit_id}): no stored hash found on this record."
 
-        verify_data = {k: v for k, v in d.items() if k not in NON_HASHED_FIELDS}
+        # Schema v3+ seals the result of AIDAL's digest cross-check into the
+        # record. A sealed "MISMATCH" means that at seal time, the digest the
+        # client supplied did NOT match the raw data they sent alongside it.
+        # The chain is still intact — nobody altered the record afterwards —
+        # but the record's own contents are internally inconsistent, which is
+        # exactly the kind of thing that must not stay buried in an old HTTP
+        # response. Collected and reported below rather than failing the
+        # chain check, because these are two genuinely different findings.
+        if d.get("digest_verification") == "MISMATCH":
+            digest_mismatches.append(audit_id)
+
+        verify_data = {k: v for k, v in d.items() if k not in non_hashed_fields(d.get("evidence_schema_version"))}
         hash_version = d.get("hash_version")  # None on records logged before this field existed
         try:
             computed = compute_hash(verify_data, prev_hash, hash_version)
@@ -182,7 +213,16 @@ def verify_chain(decisions: list):
 
         prev_hash = stored_hash
 
-    return True, f"VERIFIED — {len(decisions)} records, full chain intact, no tampering detected."
+    msg = f"VERIFIED — {len(decisions)} records, full chain intact, no tampering detected."
+    if digest_mismatches:
+        msg += (
+            f"\n\nWARNING — {len(digest_mismatches)} record(s) were sealed with "
+            f"digest_verification=\"MISMATCH\": at the time these were logged, the digest the client "
+            f"supplied did not match the raw decision data sent with it. The chain is intact (nothing "
+            f"was altered after sealing), but these records are internally inconsistent and the "
+            f"discrepancy was never resolved:\n  " + "\n  ".join(digest_mismatches)
+        )
+    return True, msg
 
 
 def verify_digest(decisions: list, audit_id: str, raw_decision_path: str):
